@@ -59,8 +59,7 @@ async def set_guild_volume(guild, value):
 
     return volume
 
-# يفضّل صيغة opus عشان نمرّرها لديسكورد بدون ترميز (أخف وما بتحتاج libopus)
-# لكن إذا تريد تضيف volume، لازم تستخدم FFmpegPCMAudio وليس Opus
+# إذا بدك تعطي صوت، لازم تكون مصادر PCM وليس Opus
 YTDL_OPTIONS = {
     "format": "bestaudio/best",
     "noplaylist": True,
@@ -71,7 +70,7 @@ YTDL_OPTIONS = {
 }
 ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
 
-# مسار FFmpeg
+# فحص ffmpeg
 FFMPEG_PATH = shutil.which("ffmpeg")
 if not FFMPEG_PATH:
     try:
@@ -79,6 +78,7 @@ if not FFMPEG_PATH:
         FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
     except Exception:
         FFMPEG_PATH = "ffmpeg"
+
 print(f"🎞️ FFmpeg: {FFMPEG_PATH}")
 
 # ====================================================
@@ -94,6 +94,7 @@ CMD_QUEUE = {"قائمة", "queue", "q"}
 CMD_PING = {"ping"}
 CMD_VOLUME = {"صوت", "volume", "vol"}
 
+# أوامر تشتغل بدون منشن إذا البوت في نفس الغرفة
 NO_MENTION_CMDS = {
     "شغل", "play", "سكب", "skip", "وقف", "pause",
     "كمل", "resume", "قائمة", "queue", "صوت", "volume", "vol"
@@ -145,7 +146,7 @@ def build_source(song):
         stderr=errf,
     )
 
-    # ✅ هذا هو التعديل المهم: لا تستخدم Opus إذا حابب تضيف volume
+    # ✅ التعديل الأساسي: PCM وليس Opus
     return discord.FFmpegPCMAudio(song["url"], **kwargs), errf
 
 async def play_next(guild, text_channel):
@@ -241,6 +242,7 @@ async def on_message(message):
     parts = clean.split()
     words = clean.lower().split()
 
+    # بدون منشن: يسمح بالأوامر فقط إذا البوت في نفس الغرفة
     if not is_mentioned:
         bot_vc = message.guild.voice_client
         author_ch = message.author.voice.channel if message.author.voice else None
