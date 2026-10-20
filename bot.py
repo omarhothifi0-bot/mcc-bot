@@ -5,8 +5,8 @@ import shutil
 import asyncio
 import tempfile
 import traceback
-import importlib
 from threading import Thread
+from collections import defaultdict
 
 import discord
 from discord.ext import commands
@@ -18,16 +18,13 @@ from flask import Flask
 # ====================================================
 app = Flask(__name__)
 
-
 @app.route("/")
 def home():
     return "Bot is running!"
 
-
 def keep_alive():
     port = int(os.getenv("PORT", 8080))
     Thread(target=lambda: app.run(host="0.0.0.0", port=port), daemon=True).start()
-
 
 # ====================================================
 # 2. الإعدادات
@@ -39,7 +36,29 @@ intents.guilds = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-song_queues = {}  # guild_id -> [songs]
+song_queues = defaultdict(list)
+guild_volumes = {}
+
+# مستوى الصوت الافتراضي لكل سيرفر
+DEFAULT_VOLUME = 1.0  # 100%
+
+def normalize_volume(value):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_VOLUME
+    value = max(0.0, min(2.0, value / 100))
+    return value
+
+async def set_guild_volume(guild, value):
+    volume = normalize_volume(value)
+    guild_volumes[guild.id] = volume
+
+    vc = guild.voice_client
+    if vc and vc.source and isinstance(vc.source, discord.PCMVolumeTransformer):
+        vc.source.volume = volume
+
+    return volume
 
 # يفضّل صيغة opus عشان نمرّرها لديسكورد بدون ترميز (أخف وما بتحتاج libopus)
 YTDL_OPTIONS = {
@@ -50,18 +69,6 @@ YTDL_OPTIONS = {
     "default_search": "auto",
     "source_address": "0.0.0.0",
 }
-# كوكيز يوتيوب (اختياري): حط ملف cookies.txt بجانب bot.py أو حدد مساره بمتغير COOKIES_FILE
-COOKIES_FILE = os.getenv("COOKIES_FILE", "cookies.txt")
-if os.path.exists(COOKIES_FILE):
-    # ننسخه لمكان قابل للكتابة لأن yt-dlp بيحدّثه
-    _cookie_copy = os.path.join(tempfile.gettempdir(), "yt_cookies.txt")
-    shutil.copyfile(COOKIES_FILE, _cookie_copy)
-    YTDL_OPTIONS["cookiefile"] = _cookie_copy
-    print("🍪 Using cookies file")
-
-DL_DIR = os.path.join(tempfile.gettempdir(), "musicbot")
-os.makedirs(DL_DIR, exist_ok=True)
-YTDL_OPTIONS["outtmpl"] = os.path.join(DL_DIR, "%(id)s.%(ext)s")
 ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
 
 # مسار FFmpeg: النظام أولاً، وبعدها النسخة الجاهزة من imageio-ffmpeg
@@ -85,66 +92,66 @@ CMD_PAUSE = {"وقف", "pause"}
 CMD_RESUME = {"كمل", "resume"}
 CMD_QUEUE = {"قائمة", "queue", "q"}
 CMD_PING = {"ping"}
-CMD_DIAG = {"تشخيص", "diag"}
+CMD_VOLUME = {"صوت", "volume", "vol"}
 
 # أوامر تشتغل بدون منشن (بس إذا البوت معك بنفس الروم)
-NO_MENTION_CMDS = {"شغل", "play", "سكب", "skip", "وقف", "pause", "كمل", "resume", "قائمة", "queue"}
+NO_MENTION_CMDS = {
+    "شغل", "play", "سكب", "skip", "وقف", "pause",
+    "كمل", "resume", "قائمة", "queue", "صوت", "volume", "vol"
+}
 
 MENTION_RE = re.compile(r"<@[!&]?\d+>")
-
 
 # ====================================================
 # 4. دوال مساعدة
 # ====================================================
 async def extract_song(query):
-    """ينزّل الصوت لملف مؤقت عشان FFmpeg يقرأ ملف محلي (أثبت من الستريم)."""
     loop = asyncio.get_running_loop()
     target = query if query.startswith("http") else f"ytsearch:{query}"
+    data = await loop.run_in_executor(None, lambda: ytdl.extract_info(target, download=False))
 
-    def fetch(t):
-        data = ytdl.extract_info(t, download=True)
-        if "entries" in data:
-            if not data["entries"]:
-                return None
-            data = data["entries"][0]
-        return {
-            "path": ytdl.prepare_filename(data),
-            "title": data.get("title", "Unknown"),
-            "acodec": data.get("acodec") or "",
-        }
+    if not data:
+        return None
 
-    def work():
-        try:
-            return fetch(target)
-        except Exception as e:
-            # إذا يوتيوب رفض (حماية البوتات)، جرّب ساوندكلاود تلقائياً
-            if query.startswith("http"):
-                raise
-            print(f"YouTube failed, trying SoundCloud: {e}")
-            return fetch(f"scsearch:{query}")
+    if "entries" in data:
+        if not data["entries"]:
+            return None
+        data = data["entries"][0]
 
-    return await loop.run_in_executor(None, work)
+    if not isinstance(data, dict):
+        return None
 
-
-def remove_file(path):
-    try:
-        os.remove(path)
-    except Exception:
-        pass
-
+    headers = data.get("http_headers") or {}
+    return {
+        "url": data["url"],
+        "title": data.get("title", "Unknown"),
+        "acodec": data.get("acodec") or "",
+        "user_agent": headers.get("User-Agent"),
+    }
 
 def build_source(song):
+    before = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
+    if song.get("user_agent"):
+        before += f' -user_agent "{song["user_agent"]}"'
+
     errf = tempfile.TemporaryFile()
-    kwargs = dict(executable=FFMPEG_PATH, options="-vn", stderr=errf)
-    # إذا الملف opus نمرره بدون إعادة ترميز
+    kwargs = dict(
+        executable=FFMPEG_PATH,
+        before_options=before,
+        options="-vn",
+        stderr=errf,
+    )
+
+    # إذا المصدر opus نمرره كما هو بدون إعادة ترميز
     if song["acodec"].startswith("opus"):
         kwargs["codec"] = "opus"
-    return discord.FFmpegOpusAudio(song["path"], **kwargs), errf
 
+    return discord.FFmpegOpusAudio(song["url"], **kwargs), errf
 
 async def play_next(guild, text_channel):
     queue = song_queues.get(guild.id)
     vc = guild.voice_client
+
     if not queue or not vc:
         return
 
@@ -152,6 +159,10 @@ async def play_next(guild, text_channel):
 
     try:
         source, errf = build_source(song)
+        source = discord.PCMVolumeTransformer(
+            source,
+            volume=guild_volumes.get(guild.id, DEFAULT_VOLUME)
+        )
     except Exception as e:
         traceback.print_exc()
         await text_channel.send(f"❌ ما قدرت أجهز الصوت لـ **{song['title']}**:\n`{e}`")
@@ -169,18 +180,13 @@ async def play_next(guild, text_channel):
         except Exception:
             pass
 
-        remove_file(song["path"])
-
         if error:
             print(f"Player error: {error}")
         if ff_err:
             print(f"FFmpeg stderr: {ff_err}")
 
         if time.time() - started < 3:
-            code = getattr(getattr(source, "_process", None), "returncode", None)
-            msg = f"⚠️ الأغنية وقفت بعد ثواني! (ffmpeg exit code: {code})"
-            if error:
-                msg += f"\nPlayer error: `{error}`"
+            msg = "⚠️ الأغنية وقفت بعد ثواني!"
             if ff_err:
                 msg += f"\n```{ff_err}```"
             asyncio.run_coroutine_threadsafe(text_channel.send(msg), bot.loop)
@@ -196,40 +202,6 @@ async def play_next(guild, text_channel):
 
     await text_channel.send(f"🎶 جاري تشغيل: **{song['title']}**")
 
-
-async def run_diagnostics(guild):
-    lines = [f"discord.py: {discord.__version__}", f"FFmpeg path: {FFMPEG_PATH}"]
-
-    async def run(*args):
-        proc = await asyncio.create_subprocess_exec(
-            *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-        )
-        out, err = await proc.communicate()
-        return out.decode(errors="ignore")
-
-    try:
-        out = await run(FFMPEG_PATH, "-hide_banner", "-version")
-        lines.append("FFmpeg: " + out.splitlines()[0])
-        enc = await run(FFMPEG_PATH, "-hide_banner", "-encoders")
-        lines.append("libopus encoder: " + ("✅" if "libopus" in enc else "❌"))
-    except Exception as e:
-        lines.append(f"FFmpeg ❌ {e}")
-
-    for mod in ("nacl", "davey"):
-        try:
-            m = importlib.import_module(mod)
-            lines.append(f"{mod}: ✅ {getattr(m, '__version__', '')}")
-        except Exception:
-            lines.append(f"{mod}: ❌ غير منصّب")
-
-    vc = guild.voice_client
-    if vc:
-        lines.append(f"Voice connected: {vc.is_connected()}")
-    else:
-        lines.append("Voice: البوت مش بروم صوتي")
-    return "```\n" + "\n".join(lines) + "\n```"
-
-
 async def join_author_channel(message):
     if not message.author.voice or not message.author.voice.channel:
         await message.channel.send("⚠️ لازم تكون داخل روم صوتي الأول!")
@@ -237,6 +209,7 @@ async def join_author_channel(message):
 
     channel = message.author.voice.channel
     vc = message.guild.voice_client
+
     try:
         if vc:
             if vc.channel != channel:
@@ -247,8 +220,8 @@ async def join_author_channel(message):
         traceback.print_exc()
         await message.channel.send(f"❌ ما قدرت أدخل الروم: `{e}`")
         return None
-    return vc
 
+    return vc
 
 # ====================================================
 # 5. الأحداث
@@ -257,7 +230,6 @@ async def join_author_channel(message):
 async def on_ready():
     print(f"✅ Logged in as: {bot.user} (ID: {bot.user.id})")
     await bot.change_presence(activity=discord.Game(name="@mention + تعال"))
-
 
 @bot.event
 async def on_message(message):
@@ -269,7 +241,7 @@ async def on_message(message):
     parts = clean.split()
     words = clean.lower().split()
 
-    # بدون منشن: بس إذا البوت بنفس روم الكاتب وأول كلمة أمر
+    # بدون منشن: بس إذا البوت نفس روم الكاتب وأول كلمة أمر
     if not is_mentioned:
         bot_vc = message.guild.voice_client
         author_ch = message.author.voice.channel if message.author.voice else None
@@ -279,7 +251,7 @@ async def on_message(message):
 
     if not words:
         await message.channel.send(
-            "👋 أنا هون! الأوامر: `تعال` / `شغل اسم الأغنية` / `سكب` / `وقف` / `كمل` / `قائمة` / `اطلع`"
+            "👋 أنا هون! الأوامر: `تعال` / `شغل اسم الأغنية` / `سكب` / `وقف` / `كمل` / `قائمة` / `صوت 50` / `اطلع`"
         )
         return
 
@@ -310,7 +282,7 @@ async def on_message(message):
                 await message.channel.send("❌ ما لقيت نتائج.")
                 return
 
-            song_queues.setdefault(gid, []).append(song)
+            song_queues[gid].append(song)
 
             if vc.is_playing() or vc.is_paused():
                 await message.channel.send(f"➕ تمت إضافة: **{song['title']}** للقائمة!")
@@ -330,8 +302,7 @@ async def on_message(message):
         elif cmd in CMD_LEAVE:
             vc = message.guild.voice_client
             if vc:
-                for sg in song_queues.pop(gid, []):
-                    remove_file(sg["path"])
+                song_queues.pop(gid, None)
                 await vc.disconnect()
                 await message.channel.send("👋 طلعت من الروم ونظفت القائمة.")
             else:
@@ -360,9 +331,29 @@ async def on_message(message):
                 lines = [f"{i}. {s['title']}" for i, s in enumerate(queue[:10], 1)]
                 await message.channel.send("📜 **القائمة:**\n" + "\n".join(lines))
 
-        # ---------- تشخيص ----------
-        elif cmd in CMD_DIAG:
-            await message.channel.send(await run_diagnostics(message.guild))
+        # ---------- صوت ----------
+        elif cmd in CMD_VOLUME:
+            if not parts[1:]:
+                current = round(guild_volumes.get(gid, DEFAULT_VOLUME) * 100)
+                await message.channel.send(f"🔊 مستوى الصوت الحالي: **{current}%**")
+                return
+
+            try:
+                value = float(parts[1])
+            except ValueError:
+                await message.channel.send("⚠️ الرقم غير صحيح. مثال: `صوت 50` أو `صوت 120`")
+                return
+
+            if value < 0 or value > 200:
+                await message.channel.send("⚠️ النسبة لازم تكون بين 0 و 200")
+                return
+
+            await set_guild_volume(message.guild, value)
+            vc = message.guild.voice_client
+            if vc and vc.source and isinstance(vc.source, discord.PCMVolumeTransformer):
+                vc.source.volume = guild_volumes[message.guild.id]
+
+            await message.channel.send(f"🔊 تم ضبط الصوت على **{int(value)}%**")
 
         # ---------- ping ----------
         elif cmd in CMD_PING:
@@ -374,7 +365,6 @@ async def on_message(message):
     except Exception as e:
         traceback.print_exc()
         await message.channel.send(f"❌ صار خطأ: `{e}`")
-
 
 # ====================================================
 # 6. التشغيل
