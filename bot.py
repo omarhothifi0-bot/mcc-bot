@@ -50,6 +50,9 @@ YTDL_OPTIONS = {
     "default_search": "auto",
     "source_address": "0.0.0.0",
 }
+DL_DIR = os.path.join(tempfile.gettempdir(), "musicbot")
+os.makedirs(DL_DIR, exist_ok=True)
+YTDL_OPTIONS["outtmpl"] = os.path.join(DL_DIR, "%(id)s.%(ext)s")
 ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
 
 # مسار FFmpeg: النظام أولاً، وبعدها النسخة الجاهزة من imageio-ffmpeg
@@ -85,39 +88,40 @@ MENTION_RE = re.compile(r"<@[!&]?\d+>")
 # 4. دوال مساعدة
 # ====================================================
 async def extract_song(query):
+    """ينزّل الصوت لملف مؤقت عشان FFmpeg يقرأ ملف محلي (أثبت من الستريم)."""
     loop = asyncio.get_running_loop()
     target = query if query.startswith("http") else f"ytsearch:{query}"
-    data = await loop.run_in_executor(None, lambda: ytdl.extract_info(target, download=False))
-    if "entries" in data:
-        if not data["entries"]:
-            return None
-        data = data["entries"][0]
-    headers = data.get("http_headers") or {}
-    return {
-        "url": data["url"],
-        "title": data.get("title", "Unknown"),
-        "acodec": data.get("acodec") or "",
-        "user_agent": headers.get("User-Agent"),
-    }
+
+    def work():
+        data = ytdl.extract_info(target, download=True)
+        if "entries" in data:
+            if not data["entries"]:
+                return None
+            data = data["entries"][0]
+        path = ytdl.prepare_filename(data)
+        return {
+            "path": path,
+            "title": data.get("title", "Unknown"),
+            "acodec": data.get("acodec") or "",
+        }
+
+    return await loop.run_in_executor(None, work)
+
+
+def remove_file(path):
+    try:
+        os.remove(path)
+    except Exception:
+        pass
 
 
 def build_source(song):
-    before = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
-    if song.get("user_agent"):
-        before += f' -user_agent "{song["user_agent"]}"'
-
     errf = tempfile.TemporaryFile()
-    kwargs = dict(
-        executable=FFMPEG_PATH,
-        before_options=before,
-        options="-vn",
-        stderr=errf,
-    )
-    # إذا المصدر opus نمرره كما هو بدون إعادة ترميز
+    kwargs = dict(executable=FFMPEG_PATH, options="-vn", stderr=errf)
+    # إذا الملف opus نمرره بدون إعادة ترميز
     if song["acodec"].startswith("opus"):
         kwargs["codec"] = "opus"
-
-    return discord.FFmpegOpusAudio(song["url"], **kwargs), errf
+    return discord.FFmpegOpusAudio(song["path"], **kwargs), errf
 
 
 async def play_next(guild, text_channel):
@@ -146,6 +150,8 @@ async def play_next(guild, text_channel):
             errf.close()
         except Exception:
             pass
+
+        remove_file(song["path"])
 
         if error:
             print(f"Player error: {error}")
@@ -306,7 +312,8 @@ async def on_message(message):
         elif cmd in CMD_LEAVE:
             vc = message.guild.voice_client
             if vc:
-                song_queues.pop(gid, None)
+                for sg in song_queues.pop(gid, []):
+                    remove_file(sg["path"])
                 await vc.disconnect()
                 await message.channel.send("👋 طلعت من الروم ونظفت القائمة.")
             else:
