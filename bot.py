@@ -68,6 +68,9 @@ CMD_RESUME = {"كمل", "resume"}
 CMD_QUEUE = {"قائمة", "queue", "q"}
 CMD_PING = {"ping"}
 
+# أوامر تشتغل بدون منشن (بس لما البوت يكون معك بنفس الروم)
+NO_MENTION_CMDS = {"شغل", "play", "skip", "سكب", "pause", "وقف", "resume", "كمل", "قائمة", "queue"}
+
 MENTION_RE = re.compile(r"<@[!&]?\d+>")
 
 
@@ -147,14 +150,20 @@ async def on_message(message):
     if message.author.bot or not message.guild:
         return
 
-    # لازم البوت يكون ممنشن
-    if bot.user not in message.mentions:
-        await bot.process_commands(message)
-        return
+    is_mentioned = bot.user in message.mentions
 
     # نظّف المنشن من النص
     clean = MENTION_RE.sub("", message.content).strip()
     words = clean.lower().split()
+
+    # بدون منشن: الأوامر تشتغل بس إذا البوت بنفس الروم الصوتي تبعك
+    if not is_mentioned:
+        bot_vc = message.guild.voice_client
+        author_channel = message.author.voice.channel if message.author.voice else None
+        in_same_room = bot_vc is not None and author_channel is not None and bot_vc.channel == author_channel
+        if not (in_same_room and words and words[0] in NO_MENTION_CMDS):
+            await bot.process_commands(message)
+            return
 
     if not words:
         await message.channel.send(
