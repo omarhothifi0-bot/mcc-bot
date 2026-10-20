@@ -47,7 +47,6 @@ YTDL_OPTIONS = {
     "no_warnings": True,
     "default_search": "auto",
     "source_address": "0.0.0.0",
-    "cookiefile": "cookies.txt",  # أضف هذا السطر ليعتمد على حسابك ويمنع حظر البوت
 }
 
 FFMPEG_OPTIONS = {
@@ -56,6 +55,14 @@ FFMPEG_OPTIONS = {
 }
 
 ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
+
+# مسار FFmpeg: يستخدم النسخة الجاهزة من imageio-ffmpeg إذا موجودة، وإلا يدور على ffmpeg بالنظام
+try:
+    import imageio_ffmpeg
+    FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
+except Exception:
+    FFMPEG_PATH = "ffmpeg"
+print(f"🎞️ FFmpeg path: {FFMPEG_PATH}")
 
 # ----------------------------------------------------
 # كلمات الأوامر
@@ -88,7 +95,7 @@ async def play_next(guild, text_channel):
     song = queue.pop(0)
 
     try:
-        source = await discord.FFmpegOpusAudio.from_probe(song["url"], **FFMPEG_OPTIONS)
+        source = discord.FFmpegOpusAudio(song["url"], executable=FFMPEG_PATH, **FFMPEG_OPTIONS)
     except Exception as e:
         await text_channel.send(f"❌ ما قدرت أشغل **{song['title']}**: `{e}`")
         await play_next(guild, text_channel)
