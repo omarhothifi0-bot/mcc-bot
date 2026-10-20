@@ -45,15 +45,9 @@ YTDL_OPTIONS = {
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
-    "default_search": "ytsearch",
+    "default_search": "auto",
     "source_address": "0.0.0.0",
-    "extract_flat": False,
-    # إضافة خيارات لمنع التعليق وتجاوز قيود يوتيوب
-    "nocheckcertificate": True,
-    "ignoreerrors": False,
-    "logtostderr": False,
-    "geo_bypass": True,
-    "cachedir": False,
+    "cookiefile": "cookies.txt",  # أضف هذا السطر ليعتمد على حسابك ويمنع حظر البوت
 }
 
 FFMPEG_OPTIONS = {
