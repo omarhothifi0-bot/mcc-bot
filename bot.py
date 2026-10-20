@@ -5,6 +5,7 @@ import shutil
 import asyncio
 import tempfile
 import traceback
+import importlib
 from threading import Thread
 
 import discord
@@ -72,6 +73,7 @@ CMD_PAUSE = {"وقف", "pause"}
 CMD_RESUME = {"كمل", "resume"}
 CMD_QUEUE = {"قائمة", "queue", "q"}
 CMD_PING = {"ping"}
+CMD_DIAG = {"تشخيص", "diag"}
 
 # أوامر تشتغل بدون منشن (بس إذا البوت معك بنفس الروم)
 NO_MENTION_CMDS = {"شغل", "play", "سكب", "skip", "وقف", "pause", "كمل", "resume", "قائمة", "queue"}
@@ -151,7 +153,10 @@ async def play_next(guild, text_channel):
             print(f"FFmpeg stderr: {ff_err}")
 
         if time.time() - started < 3:
-            msg = "⚠️ الأغنية وقفت بعد ثواني!"
+            code = getattr(getattr(source, "_process", None), "returncode", None)
+            msg = f"⚠️ الأغنية وقفت بعد ثواني! (ffmpeg exit code: {code})"
+            if error:
+                msg += f"\nPlayer error: `{error}`"
             if ff_err:
                 msg += f"\n```{ff_err}```"
             asyncio.run_coroutine_threadsafe(text_channel.send(msg), bot.loop)
@@ -166,6 +171,39 @@ async def play_next(guild, text_channel):
         return
 
     await text_channel.send(f"🎶 جاري تشغيل: **{song['title']}**")
+
+
+async def run_diagnostics(guild):
+    lines = [f"discord.py: {discord.__version__}", f"FFmpeg path: {FFMPEG_PATH}"]
+
+    async def run(*args):
+        proc = await asyncio.create_subprocess_exec(
+            *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        out, err = await proc.communicate()
+        return out.decode(errors="ignore")
+
+    try:
+        out = await run(FFMPEG_PATH, "-hide_banner", "-version")
+        lines.append("FFmpeg: " + out.splitlines()[0])
+        enc = await run(FFMPEG_PATH, "-hide_banner", "-encoders")
+        lines.append("libopus encoder: " + ("✅" if "libopus" in enc else "❌"))
+    except Exception as e:
+        lines.append(f"FFmpeg ❌ {e}")
+
+    for mod in ("nacl", "davey"):
+        try:
+            m = importlib.import_module(mod)
+            lines.append(f"{mod}: ✅ {getattr(m, '__version__', '')}")
+        except Exception:
+            lines.append(f"{mod}: ❌ غير منصّب")
+
+    vc = guild.voice_client
+    if vc:
+        lines.append(f"Voice connected: {vc.is_connected()}")
+    else:
+        lines.append("Voice: البوت مش بروم صوتي")
+    return "```\n" + "\n".join(lines) + "\n```"
 
 
 async def join_author_channel(message):
@@ -296,6 +334,10 @@ async def on_message(message):
             else:
                 lines = [f"{i}. {s['title']}" for i, s in enumerate(queue[:10], 1)]
                 await message.channel.send("📜 **القائمة:**\n" + "\n".join(lines))
+
+        # ---------- تشخيص ----------
+        elif cmd in CMD_DIAG:
+            await message.channel.send(await run_diagnostics(message.guild))
 
         # ---------- ping ----------
         elif cmd in CMD_PING:
