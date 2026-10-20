@@ -1,263 +1,209 @@
+import os
 import asyncio
-from threading import Thread
 import discord
 from discord.ext import commands
-from flask import Flask
-import os
 import yt_dlp
+from flask import Flask
+from threading import Thread
 
-# --- 1. سيرفر Web مصغر عشان Render ما ينيّم البوت ---
-app = Flask("")
+# ----------------------------------------------------
+# 1. إعداد السيرفر الوهمي (Keep-Alive) لإبقاء البوت شغال
+# ----------------------------------------------------
+app = Flask('')
 
-
-@app.route("/")
+@app.route('/')
 def home():
-  return "Bot is alive and running 24/7!"
-
+    return "Bot is running 24/7!"
 
 def run_flask():
-  app.run(host="0.0.0.0", port=8080)
-
+    app.run(host='0.0.0.0', port=8080)
 
 def keep_alive():
-  t = Thread(target=run_flask)
-  t.start()
+    t = Thread(target=run_flask)
+    t.start()
 
-
-# --- 2. إعدادات البوت والـ Intents ---
+# ----------------------------------------------------
+# 2. إعداد الـ Intents والصلاحيات المطلوبة للديسكورد
+# ----------------------------------------------------
 intents = discord.Intents.default()
-intents.message_content = True
+intents.message_content = True  # ضروري جداً لقراءة محتوى الرسائل
+intents.guilds = True
 intents.voice_states = True
+intents.members = True
 
+bot = commands.Bot(command_prefix="!", intents=intents)
 
-async def get_prefix(bot, message):
-  return [f"<@{bot.user.id}> ", f"<@!{bot.user.id}> "]
+# قائمة انتظار الصوت لكل سيرفر
+song_queues = {}
 
-
-bot = commands.Bot(command_prefix=get_prefix, intents=intents)
-
-# قوائم الانتظار لكل سيرفر
-queues = {}
-
-ytdl_format_options = {
-    "format": "bestaudio/best",
-    "restrictfilenames": True,
-    "noplaylist": True,
-    "nocheckcertificate": True,
-    "ignoreerrors": False,
-    "logtostderr": False,
-    "quiet": True,
-    "no_warnings": True,
-    "default_search": "ytsearch",
-    "source_address": "0.0.0.0",
+# إعدادات yt-dlp و FFmpeg
+YTDL_OPTIONS = {
+    'format': 'bestaudio/best',
+    'extractaudio': True,
+    'audioformat': 'mp3',
+    'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
+    'restrictfilenames': True,
+    'noplaylist': True,
+    'nocheckcertificate': True,
+    'ignoreerrors': False,
+    'logtostderr': False,
+    'quiet': True,
+    'no_warnings': True,
+    'default_search': 'auto',
+    'source_address': '0.0.0.0'
 }
 
-ffmpeg_options = {
-    "before_options": (
-        "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
-    ),
-    "options": "-vn",
+FFMPEG_OPTIONS = {
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+    'options': '-vn'
 }
 
-ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
+ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
 
+async def play_next(ctx):
+    guild_id = ctx.guild.id
+    if guild_id in song_queues and len(song_queues[guild_id]) > 0:
+        next_song = song_queues[guild_id].pop(0)
+        voice_client = ctx.guild.voice_client
+        if voice_client:
+            source = await discord.FFmpegOpusAudio.from_probe(next_song['url'], **FFMPEG_OPTIONS)
+            voice_client.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(play_next(ctx), bot.loop))
+            await ctx.send(f"🎶 جاري تشغيل: **{next_song['title']}**")
+    else:
+        pass
 
-class YTDLSource(discord.PCMVolumeTransformer):
-
-  def __init__(self, source, *, data, requester, volume=0.5):
-    super().__init__(source, volume)
-    self.data = data
-    self.title = data.get("title")
-    self.url = data.get("url")
-    self.duration = data.get("duration")
-    self.thumbnail = data.get("thumbnail")
-    self.requester = requester
-
-  @classmethod
-  async def from_url(cls, url, *, loop=None, stream=True, requester=None):
-    loop = loop or asyncio.get_event_loop()
-    data = await loop.run_in_executor(
-        None, lambda: ytdl.extract_info(url, download=not stream)
-    )
-    if "entries" in data and data["entries"]:
-      data = data["entries"][0]
-    filename = data["url"] if stream else ytdl.prepare_filename(data)
-    return cls(
-        discord.FFmpegPCMAudio(filename, **ffmpeg_options),
-        data=data,
-        requester=requester,
-    )
-
-
+# ----------------------------------------------------
+# 3. أحداث البوت (Events)
+# ----------------------------------------------------
 @bot.event
 async def on_ready():
-  print(f"Logged in as {bot.user.name} - جاهز للعمل 24/7!")
+    print(f'✅ Logged in successfully as: {bot.user.name} (ID: {bot.user.id})')
+    await bot.change_presence(activity=discord.Game(name="جاهز للتشغيل | @mention"))
 
+@bot.event
+async def on_message(message):
+    if message.author == bot.user:
+        return
 
-# --- الأوامر الأساسية ---
+    content = message.content.strip().lower()
+    is_mentioned = bot.user.mentioned_in(message)
 
+    # ------------------------------------------------
+    # 1. أمر الدخول (come / تعال / انضم)
+    # ------------------------------------------------
+    if is_mentioned and any(word in content for word in ["come", "تعال", "انضم"]):
+        if message.author.voice:
+            channel = message.author.voice.channel
+            if message.guild.voice_client:
+                await message.guild.voice_client.move_to(channel)
+            else:
+                await channel.connect()
+            await message.channel.send(f"🔊 دخلت الروم: **{channel.name}**")
+        else:
+            await message.channel.send("⚠️ لازم تكون داخل روم صوتي الأول!")
 
-# دخول الروم
-@bot.command(name="come")
-async def come(ctx):
-  if ctx.author.voice:
-    channel = ctx.author.voice.channel
-    if ctx.voice_client is not None:
-      await ctx.voice_client.move_to(channel)
+    # ------------------------------------------------
+    # 2. أمر التشغيل (شغل / ش / play / p)
+    # ------------------------------------------------
+    elif is_mentioned and any(word in content.split() for word in ["شغل", "ش", "play", "p"]):
+        if not message.author.voice:
+            await message.channel.send("⚠️ لازم تكون داخل روم صوتي عشان تشغل أغنية!")
+            return
+
+        # استخراج اسم الأغنية بعد المنشن والكلمة المفتاحية
+        words = content.split()
+        search_query = " ".join([w for w in words if not w.startswith("<@") and w not in ["شغل", "ش", "play", "p"]])
+
+        if not search_query:
+            await message.channel.send("⚠️ اكتب اسم الأغنية أو الرابط بعد الأمر! مثال: `@بوت شغل اسم الاغنية`")
+            return
+
+        # الانضمام للروم إذا لم يكن فيه
+        voice_client = message.guild.voice_client
+        if not voice_client:
+            voice_client = await message.author.voice.channel.connect()
+
+        await message.channel.send(f"🔍 جاري البحث عن: **{search_query}** ...")
+
+        # الحصول على رابط الصوت
+        loop = asyncio.get_event_loop()
+        data = await loop.run_in_executor(None, lambda: ytdl.extract_info(f"ytsearch:{search_query}", download=False))
+        
+        if 'entries' in data and len(data['entries']) > 0:
+            info = data['entries'][0]
+        else:
+            info = data
+
+        song_info = {
+            'url': info['url'],
+            'title': info['title']
+        }
+
+        guild_id = message.guild.id
+        if guild_id not in song_queues:
+            song_queues[guild_id] = []
+
+        if voice_client.is_playing() or voice_client.is_paused():
+            song_queues[guild_id].append(song_info)
+            await message.channel.send(f"➕ تم إضافة: **{song_info['title']}** للقائمة!")
+        else:
+            song_queues[guild_id].append(song_info)
+            await play_next(message)
+
+    # ------------------------------------------------
+    # 3. أمر التخطي (سكب / س / skip)
+    # ------------------------------------------------
+    elif is_mentioned and any(word in content.split() for word in ["سكب", "س", "skip"]):
+        voice_client = message.guild.voice_client
+        if voice_client and voice_client.is_playing():
+            voice_client.stop()
+            await message.channel.send("⏭️ تم تخطي الأغنية.")
+        else:
+            await message.channel.send("⚠️ ما في شي شغّال هسا عشان أعمل له سكب!")
+
+    # ------------------------------------------------
+    # 4. أمر الخروج (leave / اطلع / اخرج)
+    # ------------------------------------------------
+    elif is_mentioned and any(word in content.split() for word in ["leave", "اطلع", "اخرج", "غادر"]):
+        voice_client = message.guild.voice_client
+        if voice_client:
+            await voice_client.disconnect()
+            if message.guild.id in song_queues:
+                song_queues[message.guild.id].clear()
+            await message.channel.send("👋 طلعت من الروم ونظفت القائمة.")
+        else:
+            await message.channel.send("⚠️ البوت مش موجود بأي روم صوتي!")
+
+    # ------------------------------------------------
+    # 5. أمر إيقاف مؤقت / استئناف (وقف / كمل / pause / resume)
+    # ------------------------------------------------
+    elif is_mentioned and any(word in content.split() for word in ["وقف", "pause"]):
+        voice_client = message.guild.voice_client
+        if voice_client and voice_client.is_playing():
+            voice_client.pause()
+            await message.channel.send("⏸️ تم الإيقاف المؤقت.")
+
+    elif is_mentioned and any(word in content.split() for word in ["كمل", "resume"]):
+        voice_client = message.guild.voice_client
+        if voice_client and voice_client.is_paused():
+            voice_client.resume()
+            await message.channel.send("▶️ تم الاستئناف.")
+
+    # ------------------------------------------------
+    # 6. أمر التجربة السريع (ping)
+    # ------------------------------------------------
+    elif is_mentioned and "ping" in content:
+        await message.channel.send("🏓 Pong! البوت شغال ومستجيب 100%.")
+
+    await bot.process_commands(message)
+
+# ----------------------------------------------------
+# 4. تشغيل البوت
+# ----------------------------------------------------
+if __name__ == "__main__":
+    keep_alive()
+    token = os.getenv("DISCORD_TOKEN")
+    if token:
+        bot.run(token)
     else:
-      await channel.connect()
-    embed = discord.Embed(
-        title="🎵 تم الانضمام",
-        description=(
-            f"أبشر! دخلت روم: **{channel.name}** ومستمر معك 24/7."
-        ),
-        color=discord.Color.green(),
-    )
-    await ctx.send(embed=embed)
-  else:
-    await ctx.send("❌ لازم تكون شابك بروم صوتي الأول!")
-
-
-# الخروج من الروم
-@bot.command(name="leave")
-async def leave(ctx):
-  if ctx.voice_client:
-    if ctx.guild.id in queues:
-      queues[ctx.guild.id].clear()
-    await ctx.voice_client.disconnect()
-    await ctx.send("👋 تم الخروج من الروم وتفريغ قائمة الانتظار.")
-  else:
-    await ctx.send("❌ أنا مش شابك بأي روم صوتي!")
-
-
-# تشغيل الأغنية التالية
-def play_next(ctx):
-  guild_id = ctx.guild.id
-  if guild_id in queues and len(queues[guild_id]) > 0:
-    next_item = queues[guild_id].pop(0)
-    asyncio.run_coroutine_threadsafe(
-        play_song(ctx, next_item["search"], next_item["requester"]), bot.loop
-    )
-
-
-async def play_song(ctx, search, requester):
-  try:
-    async with ctx.typing():
-      player = await YTDLSource.from_url(
-          search, loop=bot.loop, stream=True, requester=requester
-      )
-      ctx.voice_client.play(
-          player,
-          after=lambda e: (
-              print(f"Player error: {e}") if e else play_next(ctx)
-          ),
-      )
-
-    embed = discord.Embed(
-        title="🎶 شغال الحين",
-        description=f"**[{player.title}]({player.url})**",
-        color=discord.Color.blue(),
-    )
-    if player.thumbnail:
-      embed.set_thumbnail(url=player.thumbnail)
-    embed.add_field(name="طلب بواسطة", value=requester.mention, inline=True)
-    await ctx.send(embed=embed)
-
-  except Exception as e:
-    await ctx.send(f"❌ حدث خطأ أثناء تشغيل الأغنية: {e}")
-    play_next(ctx)
-
-
-# أمر التشغيل (شغل أو ش)
-@bot.command(name="شغل", aliases=["ش"])
-async def play(ctx, *, search: str):
-  if not ctx.voice_client:
-    if ctx.author.voice:
-      await ctx.author.voice.channel.connect()
-    else:
-      await ctx.send("❌ لازم تكون شابك بروم صوتي أول!")
-      return
-
-  guild_id = ctx.guild.id
-  if guild_id not in queues:
-    queues[guild_id] = []
-
-  if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
-    queues[guild_id].append({"search": search, "requester": ctx.author})
-    embed = discord.Embed(
-        title="📥 تمت الإضافة لقائمة الانتظار",
-        description=f"البحث عن: **{search}**",
-        color=discord.Color.gold(),
-    )
-    embed.set_footer(
-        text=f"ترتيبها بالقائمة: #{len(queues[guild_id])} | طلب بواسطة:"
-        f" {ctx.author.display_name}"
-    )
-    await ctx.send(embed=embed)
-  else:
-    await play_song(ctx, search, ctx.author)
-
-
-# أمر التخطي (س أو سكب)
-@bot.command(name="سكب", aliases=["س"])
-async def skip(ctx):
-  if ctx.voice_client and ctx.voice_client.is_playing():
-    ctx.voice_client.stop()
-    await ctx.send("⏭️ تم تخطي الأغنية الحالية.")
-  else:
-    await ctx.send("❌ ما في أغنية شغالة حالياً عشان أعمل لها سكب!")
-
-
-# إيقاف مؤقت (وقف)
-@bot.command(name="وقف")
-async def pause(ctx):
-  if ctx.voice_client and ctx.voice_client.is_playing():
-    ctx.voice_client.pause()
-    await ctx.send("⏸️ تم الإيقاف المؤقت.")
-  else:
-    await ctx.send("❌ ما في شيء شغال حالياً!")
-
-
-# استكمال التشغيل (كمل)
-@bot.command(name="كمل")
-async def resume(ctx):
-  if ctx.voice_client and ctx.voice_client.is_paused():
-    ctx.voice_client.resume()
-    await ctx.send("▶️ تم استكمال التشغيل.")
-  else:
-    await ctx.send("❌ الأغنية مش موقوفة مؤقتاً!")
-
-
-# عرض القائمة (قائمة أو q)
-@bot.command(name="قائمة", aliases=["q"])
-async def queue(ctx):
-  guild_id = ctx.guild.id
-  if guild_id in queues and len(queues[guild_id]) > 0:
-    description = ""
-    for i, item in enumerate(queues[guild_id], 1):
-      description += (
-          f"**{i}.** {item['search']} — (طلب: {item['requester'].mention})\n"
-      )
-
-    embed = discord.Embed(
-        title="📋 قائمة الانتظار الحالية",
-        description=description,
-        color=discord.Color.purple(),
-    )
-    await ctx.send(embed=embed)
-  else:
-    await ctx.send("📜 قائمة الانتظار فارغة حالياً.")
-
-
-# مسح القائمة (تنظيف أو clear)
-@bot.command(name="تنظيف", aliases=["clear"])
-async def clear_queue(ctx):
-  guild_id = ctx.guild.id
-  if guild_id in queues:
-    queues[guild_id].clear()
-  await ctx.send("🧹 تم مسح جميع الأغاني من قائمة الانتظار.")
-
-
-# تشغيل سيرفر الـ Flask والبوت
-keep_alive()
-bot.run(os.getenv("DISCORD_TOKEN"))
+        print("❌ DISCORD_TOKEN is missing!")
