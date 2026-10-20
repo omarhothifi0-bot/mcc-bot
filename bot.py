@@ -50,6 +50,15 @@ YTDL_OPTIONS = {
     "default_search": "auto",
     "source_address": "0.0.0.0",
 }
+# كوكيز يوتيوب (اختياري): حط ملف cookies.txt بجانب bot.py أو حدد مساره بمتغير COOKIES_FILE
+COOKIES_FILE = os.getenv("COOKIES_FILE", "cookies.txt")
+if os.path.exists(COOKIES_FILE):
+    # ننسخه لمكان قابل للكتابة لأن yt-dlp بيحدّثه
+    _cookie_copy = os.path.join(tempfile.gettempdir(), "yt_cookies.txt")
+    shutil.copyfile(COOKIES_FILE, _cookie_copy)
+    YTDL_OPTIONS["cookiefile"] = _cookie_copy
+    print("🍪 Using cookies file")
+
 DL_DIR = os.path.join(tempfile.gettempdir(), "musicbot")
 os.makedirs(DL_DIR, exist_ok=True)
 YTDL_OPTIONS["outtmpl"] = os.path.join(DL_DIR, "%(id)s.%(ext)s")
@@ -92,18 +101,27 @@ async def extract_song(query):
     loop = asyncio.get_running_loop()
     target = query if query.startswith("http") else f"ytsearch:{query}"
 
-    def work():
-        data = ytdl.extract_info(target, download=True)
+    def fetch(t):
+        data = ytdl.extract_info(t, download=True)
         if "entries" in data:
             if not data["entries"]:
                 return None
             data = data["entries"][0]
-        path = ytdl.prepare_filename(data)
         return {
-            "path": path,
+            "path": ytdl.prepare_filename(data),
             "title": data.get("title", "Unknown"),
             "acodec": data.get("acodec") or "",
         }
+
+    def work():
+        try:
+            return fetch(target)
+        except Exception as e:
+            # إذا يوتيوب رفض (حماية البوتات)، جرّب ساوندكلاود تلقائياً
+            if query.startswith("http"):
+                raise
+            print(f"YouTube failed, trying SoundCloud: {e}")
+            return fetch(f"scsearch:{query}")
 
     return await loop.run_in_executor(None, work)
 
