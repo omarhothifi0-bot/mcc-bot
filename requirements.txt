@@ -1,5 +1,7 @@
-discord.py[voice]
+discord.py[voice]>=2.6
 PyNaCl
+davey
 yt-dlp
 flask
 imageio-ffmpeg
+ 
