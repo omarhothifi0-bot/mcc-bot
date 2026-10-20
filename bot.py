@@ -39,7 +39,6 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 song_queues = defaultdict(list)
 guild_volumes = {}
 
-# مستوى الصوت الافتراضي لكل سيرفر
 DEFAULT_VOLUME = 1.0  # 100%
 
 def normalize_volume(value):
@@ -61,8 +60,9 @@ async def set_guild_volume(guild, value):
     return volume
 
 # يفضّل صيغة opus عشان نمرّرها لديسكورد بدون ترميز (أخف وما بتحتاج libopus)
+# لكن إذا تريد تضيف volume، لازم تستخدم FFmpegPCMAudio وليس Opus
 YTDL_OPTIONS = {
-    "format": "bestaudio[acodec=opus]/bestaudio/best",
+    "format": "bestaudio/best",
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
@@ -71,7 +71,7 @@ YTDL_OPTIONS = {
 }
 ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
 
-# مسار FFmpeg: النظام أولاً، وبعدها النسخة الجاهزة من imageio-ffmpeg
+# مسار FFmpeg
 FFMPEG_PATH = shutil.which("ffmpeg")
 if not FFMPEG_PATH:
     try:
@@ -94,7 +94,6 @@ CMD_QUEUE = {"قائمة", "queue", "q"}
 CMD_PING = {"ping"}
 CMD_VOLUME = {"صوت", "volume", "vol"}
 
-# أوامر تشتغل بدون منشن (بس إذا البوت معك بنفس الروم)
 NO_MENTION_CMDS = {
     "شغل", "play", "سكب", "skip", "وقف", "pause",
     "كمل", "resume", "قائمة", "queue", "صوت", "volume", "vol"
@@ -108,7 +107,11 @@ MENTION_RE = re.compile(r"<@[!&]?\d+>")
 async def extract_song(query):
     loop = asyncio.get_running_loop()
     target = query if query.startswith("http") else f"ytsearch:{query}"
-    data = await loop.run_in_executor(None, lambda: ytdl.extract_info(target, download=False))
+
+    try:
+        data = await loop.run_in_executor(None, lambda: ytdl.extract_info(target, download=False))
+    except Exception:
+        return None
 
     if not data:
         return None
@@ -142,11 +145,8 @@ def build_source(song):
         stderr=errf,
     )
 
-    # إذا المصدر opus نمرره كما هو بدون إعادة ترميز
-    if song["acodec"].startswith("opus"):
-        kwargs["codec"] = "opus"
-
-    return discord.FFmpegOpusAudio(song["url"], **kwargs), errf
+    # ✅ هذا هو التعديل المهم: لا تستخدم Opus إذا حابب تضيف volume
+    return discord.FFmpegPCMAudio(song["url"], **kwargs), errf
 
 async def play_next(guild, text_channel):
     queue = song_queues.get(guild.id)
@@ -241,7 +241,6 @@ async def on_message(message):
     parts = clean.split()
     words = clean.lower().split()
 
-    # بدون منشن: بس إذا البوت نفس روم الكاتب وأول كلمة أمر
     if not is_mentioned:
         bot_vc = message.guild.voice_client
         author_ch = message.author.voice.channel if message.author.voice else None
